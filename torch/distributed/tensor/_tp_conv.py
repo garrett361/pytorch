@@ -44,8 +44,8 @@ def _is_supported(input_size, kernel_size, stride, padding, dilation):
 
 def _ring_send_recv_construct(in_tensor, d1, d2, left, right, rank, size):
     # dist comms and reconstruct local input tensor
-    send_to_right = in_tensor[:, :, :, -d1:].contiguous()
-    send_to_left = in_tensor[:, :, :, :d2].contiguous()
+    send_to_right = in_tensor[..., -d1:].contiguous()
+    send_to_left = in_tensor[..., :d2].contiguous()
     recv_from_right = torch.empty_like(send_to_left)
     recv_from_left = torch.empty_like(send_to_right)
 
@@ -72,8 +72,8 @@ def _ring_send_recv_construct(in_tensor, d1, d2, left, right, rank, size):
 
 def _ring_send_recv_aggregate(grad_in_tensor, d1, d2, left, right, rank, size):
     # dist comms and aggregate gradients for edge pixels
-    send_to_right = grad_in_tensor[:, :, :, -d2:].contiguous()
-    send_to_left = grad_in_tensor[:, :, :, :d1].contiguous()
+    send_to_right = grad_in_tensor[..., -d2:].contiguous()
+    send_to_left = grad_in_tensor[..., :d1].contiguous()
     recv_from_right = torch.empty_like(send_to_left)
     recv_from_left = torch.empty_like(send_to_right)
 
@@ -89,22 +89,22 @@ def _ring_send_recv_aggregate(grad_in_tensor, d1, d2, left, right, rank, size):
         req.wait()
 
     if rank == 0:
-        grad_in_tensor = grad_in_tensor[:, :, :, :-d2]
-        grad_in_tensor[:, :, :, -d1:] = torch.add(
-            grad_in_tensor[:, :, :, -d1:], recv_from_right
+        grad_in_tensor = grad_in_tensor[..., :-d2]
+        grad_in_tensor[..., -d1:] = torch.add(
+            grad_in_tensor[..., -d1:], recv_from_right
         )
     elif rank == size - 1:
-        grad_in_tensor = grad_in_tensor[:, :, :, d1:]
-        grad_in_tensor[:, :, :, :d2] = torch.add(
-            grad_in_tensor[:, :, :, :d2], recv_from_left
+        grad_in_tensor = grad_in_tensor[..., d1:]
+        grad_in_tensor[..., :d2] = torch.add(
+            grad_in_tensor[..., :d2], recv_from_left
         )
     else:
-        grad_in_tensor = grad_in_tensor[:, :, :, d1:-d2]
-        grad_in_tensor[:, :, :, -d1:] = torch.add(
-            grad_in_tensor[:, :, :, -d1:], recv_from_right
+        grad_in_tensor = grad_in_tensor[..., d1:-d2]
+        grad_in_tensor[..., -d1:] = torch.add(
+            grad_in_tensor[..., -d1:], recv_from_right
         )
-        grad_in_tensor[:, :, :, :d2] = torch.add(
-            grad_in_tensor[:, :, :, :d2], recv_from_left
+        grad_in_tensor[..., :d2] = torch.add(
+            grad_in_tensor[..., :d2], recv_from_left
         )
 
 
@@ -152,11 +152,11 @@ def tp_convolution(
         padding_w = padding[1]
         w = local_results.size(3)
         if rank == 0:
-            local_results = local_results[:, :, :, : w - padding_w]
+            local_results = local_results[..., : w - padding_w]
         elif rank == size - 1:
-            local_results = local_results[:, :, :, padding_w:]
+            local_results = local_results[..., padding_w:]
         else:
-            local_results = local_results[:, :, :, padding_w : w - padding_w]
+            local_results = local_results[..., padding_w : w - padding_w]
 
         return local_results
 
