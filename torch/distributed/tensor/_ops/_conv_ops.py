@@ -17,7 +17,6 @@ def _get_conv_output_shape_stride(
     padding: list[int],
     dilation: list[int],
 ) -> tuple[list[int], tuple[int, ...]]:
-    N = in_shape[0]
     C_out = weight_shape[0]
 
     W_in_t = torch.tensor(in_shape[2:])
@@ -30,7 +29,13 @@ def _get_conv_output_shape_stride(
         W_in_t + 2 * padding_t - dilation_t * (weight_shape_t - 1) - 1
     ) // stride_t + 1
 
-    output_shape = [N, C_out, *W_out_t.tolist()]
+
+    # A batch dim is optional for convolutions.
+    has_batch_dim = len(in_shape) == len(weight_shape)
+    if has_batch_dim:
+        output_shape = [in_shape[0], C_out, *W_out_t.tolist()]
+    else:
+        output_shape = [C_out, *W_out_t.tolist()]
     output_stride = (
         torch.tensor([1] + output_shape[-1:0:-1])
         .cumprod(dim=-1)

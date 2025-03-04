@@ -49,7 +49,7 @@ class DistConvolutionOpsTest(DTensorTestBase):
     @with_comms
     def test_downsampling_convolution(self):
         device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
-        shard_spec = [Shard(3)]
+        shard_spec = [Shard(-1)]
 
         input_list = torch.rand(ITER_TIME, 7, 3, 512, 1024)
         grad_output_list = torch.rand(ITER_TIME, 7, 256, 128, 256) * 1e-3
@@ -113,13 +113,121 @@ class DistConvolutionOpsTest(DTensorTestBase):
             f"Too large relative mse for bias tensor, expected less equal 1e-6, got {bias_mse_rel}",
         )
 
+    @with_comms
+    def test_downsampling_convolution_no_bias(self):
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        shard_spec = [Shard(-1)]
+
+        input_list = torch.rand(ITER_TIME, 7, 3, 512, 1024)
+        grad_output_list = torch.rand(ITER_TIME, 7, 256, 128, 256) * 1e-3
+
+        model = nn.Conv2d(3, 256, bias=False, kernel_size=4, stride=4, padding=0).to(
+            self.device_type
+        )
+        nn.init.ones_(model.weight)
+        model_gt = copy.deepcopy(model).to(self.device_type)
+
+        # training with dtensor
+        model = distribute_module(
+            model, device_mesh, _conv_fn, input_fn=None, output_fn=None
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=LR)
+        for i in range(ITER_TIME):
+            optimizer.zero_grad()
+            inp = input_list[i].to(self.device_type).requires_grad_()
+            inp_dtensor = distribute_tensor(inp, device_mesh, shard_spec)
+            output = model(inp_dtensor)
+            grad_output = grad_output_list[i].to(self.device_type)
+            grad_output_dtensor = distribute_tensor(
+                grad_output, device_mesh, shard_spec
+            )
+            output.backward(grad_output_dtensor)
+            optimizer.step()
+
+        # training with plain tensor
+        optimizer_gt = torch.optim.SGD(model_gt.parameters(), lr=LR)
+        for i in range(ITER_TIME):
+            optimizer_gt.zero_grad()
+            inp = input_list[i].to(self.device_type).requires_grad_()
+            output = model_gt(inp)
+            grad_output = grad_output_list[i].to(self.device_type)
+            output.backward(grad_output)
+            optimizer_gt.step()
+
+        weight_diff_abs = model.weight.to_local() - model_gt.weight
+        weight_diff_rel = weight_diff_abs / (torch.abs(model_gt.weight) + 1e-8)
+        weight_mse_abs = torch.mean(weight_diff_abs * weight_diff_abs).item()
+        weight_mse_rel = torch.mean(weight_diff_rel * weight_diff_rel).item()
+        self.assertTrue(
+            weight_mse_abs <= 1e-6,
+            f"Too large absolute mse for weight tensor, expected less equal 1e-6, got {weight_mse_abs}",
+        )
+        self.assertTrue(
+            weight_mse_rel <= 1e-6,
+            f"Too large relative mse for weight tensor, expected less equal 1e-6, got {weight_mse_rel}",
+        )
+
+    @with_comms
+    def test_downsampling_convolution_no_batch_dim(self):
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        shard_spec = [Shard(-1)]
+
+        input_list = torch.rand(ITER_TIME, 3, 512, 1024)
+        grad_output_list = torch.rand(ITER_TIME, 256, 128, 256) * 1e-3
+
+        model = nn.Conv2d(3, 256, bias=False, kernel_size=4, stride=4, padding=0).to(
+            self.device_type
+        )
+        nn.init.ones_(model.weight)
+        model_gt = copy.deepcopy(model).to(self.device_type)
+
+        # training with dtensor
+        model = distribute_module(
+            model, device_mesh, _conv_fn, input_fn=None, output_fn=None
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=LR)
+        for i in range(ITER_TIME):
+            optimizer.zero_grad()
+            inp = input_list[i].to(self.device_type).requires_grad_()
+            inp_dtensor = distribute_tensor(inp, device_mesh, shard_spec)
+            output = model(inp_dtensor)
+            grad_output = grad_output_list[i].to(self.device_type)
+            grad_output_dtensor = distribute_tensor(
+                grad_output, device_mesh, shard_spec
+            )
+            output.backward(grad_output_dtensor)
+            optimizer.step()
+
+        # training with plain tensor
+        optimizer_gt = torch.optim.SGD(model_gt.parameters(), lr=LR)
+        for i in range(ITER_TIME):
+            optimizer_gt.zero_grad()
+            inp = input_list[i].to(self.device_type).requires_grad_()
+            output = model_gt(inp)
+            grad_output = grad_output_list[i].to(self.device_type)
+            output.backward(grad_output)
+            optimizer_gt.step()
+
+        weight_diff_abs = model.weight.to_local() - model_gt.weight
+        weight_diff_rel = weight_diff_abs / (torch.abs(model_gt.weight) + 1e-8)
+        weight_mse_abs = torch.mean(weight_diff_abs * weight_diff_abs).item()
+        weight_mse_rel = torch.mean(weight_diff_rel * weight_diff_rel).item()
+        self.assertTrue(
+            weight_mse_abs <= 1e-6,
+            f"Too large absolute mse for weight tensor, expected less equal 1e-6, got {weight_mse_abs}",
+        )
+        self.assertTrue(
+            weight_mse_rel <= 1e-6,
+            f"Too large relative mse for weight tensor, expected less equal 1e-6, got {weight_mse_rel}",
+        )
+
     # TODO: test_depthwise_convolution is broken in CI with gloo backend.
     # Temporarily disable it to unblock CI.
     @with_comms
     @skip_if_lt_x_gpu(2)
     def test_depthwise_convolution(self):
         device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
-        shard_spec = [Shard(3)]
+        shard_spec = [Shard(-1)]
 
         input_list = torch.rand(ITER_TIME, 7, 256, 128, 256)
         grad_output_list = torch.rand(ITER_TIME, 7, 256, 128, 256) * 1e-3
@@ -184,60 +292,6 @@ class DistConvolutionOpsTest(DTensorTestBase):
         )
 
     @with_comms
-    def test_downsampling_convolution_no_bias(self):
-        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
-        shard_spec = [Shard(3)]
-
-        input_list = torch.rand(ITER_TIME, 7, 3, 512, 1024)
-        grad_output_list = torch.rand(ITER_TIME, 7, 256, 128, 256) * 1e-3
-
-        model = nn.Conv2d(3, 256, bias=False, kernel_size=4, stride=4, padding=0).to(
-            self.device_type
-        )
-        nn.init.ones_(model.weight)
-        model_gt = copy.deepcopy(model).to(self.device_type)
-
-        # training with dtensor
-        model = distribute_module(
-            model, device_mesh, _conv_fn, input_fn=None, output_fn=None
-        )
-        optimizer = torch.optim.SGD(model.parameters(), lr=LR)
-        for i in range(ITER_TIME):
-            optimizer.zero_grad()
-            inp = input_list[i].to(self.device_type).requires_grad_()
-            inp_dtensor = distribute_tensor(inp, device_mesh, shard_spec)
-            output = model(inp_dtensor)
-            grad_output = grad_output_list[i].to(self.device_type)
-            grad_output_dtensor = distribute_tensor(
-                grad_output, device_mesh, shard_spec
-            )
-            output.backward(grad_output_dtensor)
-            optimizer.step()
-
-        # training with plain tensor
-        optimizer_gt = torch.optim.SGD(model_gt.parameters(), lr=LR)
-        for i in range(ITER_TIME):
-            optimizer_gt.zero_grad()
-            inp = input_list[i].to(self.device_type).requires_grad_()
-            output = model_gt(inp)
-            grad_output = grad_output_list[i].to(self.device_type)
-            output.backward(grad_output)
-            optimizer_gt.step()
-
-        weight_diff_abs = model.weight.to_local() - model_gt.weight
-        weight_diff_rel = weight_diff_abs / (torch.abs(model_gt.weight) + 1e-8)
-        weight_mse_abs = torch.mean(weight_diff_abs * weight_diff_abs).item()
-        weight_mse_rel = torch.mean(weight_diff_rel * weight_diff_rel).item()
-        self.assertTrue(
-            weight_mse_abs <= 1e-6,
-            f"Too large absolute mse for weight tensor, expected less equal 1e-6, got {weight_mse_abs}",
-        )
-        self.assertTrue(
-            weight_mse_rel <= 1e-6,
-            f"Too large relative mse for weight tensor, expected less equal 1e-6, got {weight_mse_rel}",
-        )
-
-    @with_comms
     @skip_if_lt_x_gpu(2)
     def test_conv_backward_none_grad_inp(self):
         device_mesh = init_device_mesh(
@@ -258,6 +312,38 @@ class DistConvolutionOpsTest(DTensorTestBase):
         self.assertTrue(w_dt.grad is not None)
         self.assertTrue(b_dt.grad is not None)
         self.assertTrue(x_dt.grad is None)
+
+    @with_comms
+    @skip_if_lt_x_gpu(2)
+    def test_conv_1d(self) -> None:
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        shard_spec = [Shard(-1)]
+
+        inp = torch.arange(
+            16 * self.world_size,
+            dtype=torch.bfloat16,
+            requires_grad=True,
+            device=self.device_type,
+        )[None, None]
+        inp_dt = DTensor.from_local(
+            inp,
+            device_mesh,
+            [Replicate()],
+        )
+        inp_dt = inp_dt.redistribute(device_mesh, shard_spec)
+        width = 4
+        weight_dt = nn.Parameter(
+            DTensor.from_local(
+                torch.ones(1, 1, width, dtype=torch.bfloat16, device=self.device_type),
+                device_mesh,
+                [Replicate()],
+            )
+        )
+        out_dt = F.conv1d(
+            inp_dt, weight=weight_dt, bias=None, stride=1, padding=width - 1
+        )
+        out_dt
+        inp_dt
 
 
 if __name__ == "__main__":
