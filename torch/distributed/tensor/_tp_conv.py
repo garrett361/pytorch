@@ -17,23 +17,28 @@ def _requires_data_exchange(padding):
 
 
 def _is_supported(input_size, kernel_size, stride, padding, dilation):
-    if dilation[1] != 1:
-        raise RuntimeError("Dilation must be 1 for tensor parallel convolution.")
-    if padding[1] != 0:
-        if stride[1] != 1:
-            raise RuntimeError(
-                "Stride must be 1 when there is padding for tensor parallel convolution."
-            )
-        if kernel_size[3] // 2 > input_size[3]:
-            raise RuntimeError(
-                "kernel_size[3] // 2 should be less than or equal to input_size[3] for tensor parallel convolution."
-            )
-    else:
-        if not (input_size[3] % stride[1] == 0 and stride[1] == kernel_size[3]):
-            raise RuntimeError(
-                "It requires that input_size[3] is divisible by stride[1] and stride[1] equals kernel_size[3] "
-                "when there is padding for tensor parallel convolution."
-            )
+    n_conv_dims = len(kernel_size) - 2
+    if n_conv_dims == 1:
+        # TODO: @goon - make non-trivial
+        pass
+    elif n_conv_dims == 2:
+        if dilation[1] != 1:
+            raise RuntimeError("Dilation must be 1 for tensor parallel convolution.")
+        if padding[1] != 0:
+            if stride[1] != 1:
+                raise RuntimeError(
+                    "Stride must be 1 when there is padding for tensor parallel convolution."
+                )
+            if kernel_size[3] // 2 > input_size[3]:
+                raise RuntimeError(
+                    "kernel_size[3] // 2 should be less than or equal to input_size[3] for tensor parallel convolution."
+                )
+        else:
+            if not (input_size[3] % stride[1] == 0 and stride[1] == kernel_size[3]):
+                raise RuntimeError(
+                    "It requires that input_size[3] is divisible by stride[1] and stride[1] equals kernel_size[3] "
+                    "when there is padding for tensor parallel convolution."
+                )
     return True
 
 
