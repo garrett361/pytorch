@@ -184,6 +184,60 @@ class DistConvolutionOpsTest(DTensorTestBase):
         )
 
     @with_comms
+    def test_downsampling_convolution_no_bias(self):
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        shard_spec = [Shard(3)]
+
+        input_list = torch.rand(ITER_TIME, 7, 3, 512, 1024)
+        grad_output_list = torch.rand(ITER_TIME, 7, 256, 128, 256) * 1e-3
+
+        model = nn.Conv2d(3, 256, bias=False, kernel_size=4, stride=4, padding=0).to(
+            self.device_type
+        )
+        nn.init.ones_(model.weight)
+        model_gt = copy.deepcopy(model).to(self.device_type)
+
+        # training with dtensor
+        model = distribute_module(
+            model, device_mesh, _conv_fn, input_fn=None, output_fn=None
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=LR)
+        for i in range(ITER_TIME):
+            optimizer.zero_grad()
+            inp = input_list[i].to(self.device_type).requires_grad_()
+            inp_dtensor = distribute_tensor(inp, device_mesh, shard_spec)
+            output = model(inp_dtensor)
+            grad_output = grad_output_list[i].to(self.device_type)
+            grad_output_dtensor = distribute_tensor(
+                grad_output, device_mesh, shard_spec
+            )
+            output.backward(grad_output_dtensor)
+            optimizer.step()
+
+        # training with plain tensor
+        optimizer_gt = torch.optim.SGD(model_gt.parameters(), lr=LR)
+        for i in range(ITER_TIME):
+            optimizer_gt.zero_grad()
+            inp = input_list[i].to(self.device_type).requires_grad_()
+            output = model_gt(inp)
+            grad_output = grad_output_list[i].to(self.device_type)
+            output.backward(grad_output)
+            optimizer_gt.step()
+
+        weight_diff_abs = model.weight.to_local() - model_gt.weight
+        weight_diff_rel = weight_diff_abs / (torch.abs(model_gt.weight) + 1e-8)
+        weight_mse_abs = torch.mean(weight_diff_abs * weight_diff_abs).item()
+        weight_mse_rel = torch.mean(weight_diff_rel * weight_diff_rel).item()
+        self.assertTrue(
+            weight_mse_abs <= 1e-6,
+            f"Too large absolute mse for weight tensor, expected less equal 1e-6, got {weight_mse_abs}",
+        )
+        self.assertTrue(
+            weight_mse_rel <= 1e-6,
+            f"Too large relative mse for weight tensor, expected less equal 1e-6, got {weight_mse_rel}",
+        )
+
+    @with_comms
     @skip_if_lt_x_gpu(2)
     def test_conv_backward_none_grad_inp(self):
         device_mesh = init_device_mesh(
