@@ -46,8 +46,8 @@ def _ring_send_recv_construct(in_tensor, d1, d2, left, right, rank, size):
     # dist comms and reconstruct local input tensor
     send_to_right = in_tensor[:, :, :, -d1:].contiguous()
     send_to_left = in_tensor[:, :, :, :d2].contiguous()
-    recv_from_right = torch.zeros_like(send_to_left)
-    recv_from_left = torch.zeros_like(send_to_right)
+    recv_from_right = torch.empty_like(send_to_left)
+    recv_from_left = torch.empty_like(send_to_right)
 
     send_op_right = dist.P2POp(dist.isend, send_to_right, right)
     send_op_left = dist.P2POp(dist.isend, send_to_left, left)
@@ -74,8 +74,8 @@ def _ring_send_recv_aggregate(grad_in_tensor, d1, d2, left, right, rank, size):
     # dist comms and aggregate gradients for edge pixels
     send_to_right = grad_in_tensor[:, :, :, -d2:].contiguous()
     send_to_left = grad_in_tensor[:, :, :, :d1].contiguous()
-    recv_from_right = torch.zeros_like(send_to_left)
-    recv_from_left = torch.zeros_like(send_to_right)
+    recv_from_right = torch.empty_like(send_to_left)
+    recv_from_left = torch.empty_like(send_to_right)
 
     send_op_right = dist.P2POp(dist.isend, send_to_right, right)
     send_op_left = dist.P2POp(dist.isend, send_to_left, left)
