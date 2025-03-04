@@ -11,35 +11,33 @@ aten = torch.ops.aten
 
 
 def _get_conv_output_shape_stride(
-    n_conv_dims: int,
     in_shape: torch.Size,
     weight_shape: torch.Size,
     stride: list[int],
     padding: list[int],
     dilation: list[int],
 ) -> tuple[list[int], tuple[int, ...]]:
-    if n_conv_dims == 1:
-        N, W_in = in_shape[0], in_shape[-1]
-        C_out = weight_shape[0]
-        W_out = (
-            W_in + 2 * padding[0] - dilation[0] * (weight_shape[-1] - 1) - 1
-        ) // stride[0] + 1
-        output_shape = [N, C_out, W_out]
-        output_stride = (C_out * W_out, W_out, 1)
-    elif n_conv_dims == 2:
-        N, H_in, W_in = in_shape[0], in_shape[2], in_shape[3]
-        C_out = weight_shape[0]
-        H_out = (
-            H_in + 2 * padding[0] - dilation[0] * (weight_shape[2] - 1) - 1
-        ) // stride[0] + 1
-        W_out = (
-            W_in + 2 * padding[1] - dilation[1] * (weight_shape[3] - 1) - 1
-        ) // stride[1] + 1
-        output_shape = [N, C_out, H_out, W_out]
-        output_stride = (C_out * H_out * W_out, H_out * W_out, W_out, 1)
-    else:
-        #TODO: @goon - Conv3d
-        raise ValueError(f"{n_conv_dims}D convolutions not supported")
+    N = in_shape[0]
+    C_out = weight_shape[0]
+
+    W_in_t = torch.tensor(in_shape[2:])
+    stride_t = torch.tensor(stride)
+    padding_t = torch.tensor(padding)
+    dilation_t = torch.tensor(dilation)
+    dilation_t = torch.tensor(dilation)
+    weight_shape_t = torch.tensor(weight_shape[2:])
+    W_out_t = (
+        W_in_t + 2 * padding_t - dilation_t * (weight_shape_t - 1) - 1
+    ) // stride_t + 1
+
+    output_shape = [N, C_out, *W_out_t.tolist()]
+    output_stride = (
+        torch.tensor([1] + output_shape[-1:0:-1])
+        .cumprod(dim=-1)
+        .flip(dims=(-1,))
+        .tolist()
+    )
+
     return output_shape, output_stride
 
 
@@ -69,9 +67,7 @@ def convolution_rules(op_schema: OpSchema) -> OutputSharding:
     assert isinstance(dilation, list)
     assert isinstance(weight_shape, torch.Size)
 
-    n_conv_dims = len(weight_spec.tensor_meta.shape) - 2
     output_shape, output_stride = _get_conv_output_shape_stride(
-        n_conv_dims,
         in_shape,
         weight_shape,
         stride,
@@ -118,7 +114,7 @@ def convolution_backward_rules(op_schema: OpSchema) -> OutputSharding:
     assert input_spec.tensor_meta is not None
 
     # _output_mask order is (input, weight, bias)
-    grad_input_spec =   input_spec if _output_mask[0] else None
+    grad_input_spec = input_spec if _output_mask[0] else None
     if _output_mask[1]:
         weight_tensor_meta = weight_spec.tensor_meta
         grad_weight_spec = DTensorSpec.from_dim_map(
