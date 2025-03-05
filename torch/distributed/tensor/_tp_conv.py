@@ -246,6 +246,14 @@ def convolution_handler(
     output_sharding = op_info.output_sharding
     assert output_sharding is not None, "output sharding should not be None"
 
+    weight_schema = op_info.schema.args_schema[1]
+    if weight_schema.is_sharded():
+        raise NotImplementedError("Convolutions with sharded weights not currently supported")
+
+    bias_schema = op_info.schema.args_schema[2]
+    if bias_schema is not None and bias_schema.is_sharded():
+        raise NotImplementedError("Convolutions with sharded biases not currently supported")
+
     no_sharded_args = not any(
         dt_spec.is_sharded()
         for dt_spec in op_info.schema.args_schema
@@ -283,6 +291,10 @@ def convolution_backward_handler(
     assert output_sharding is not None, "output sharding should not be None"
 
     # local propagation
+    weight_schema = op_info.schema.args_schema[2]
+    if weight_schema.is_sharded():
+        raise NotImplementedError("Convolutions with sharded weights not currently supported")
+
     no_sharded_args = not any(
         dt_spec.is_sharded()
         for dt_spec in op_info.schema.args_schema
