@@ -240,15 +240,23 @@ def convolution_handler(
     # extract local tensor and sharding infos to a OpInfo
     op_info = dtensor.DTensor._op_dispatcher.unwrap_to_op_info(op_call, args, kwargs)
 
+
     # sharding propagation
     dtensor.DTensor._op_dispatcher.sharding_propagator.propagate(op_info)
     output_sharding = op_info.output_sharding
     assert output_sharding is not None, "output sharding should not be None"
 
-    # local propagation
-    local_results = tp_convolution(
-        op_call, tuple(op_info.local_args), op_info.local_kwargs
+    no_sharded_args = not any(
+        dt_spec.is_sharded()
+        for dt_spec in op_info.schema.args_schema
+        if isinstance(dt_spec, DTensorSpec)
     )
+    if no_sharded_args:
+        local_results = op_call(*op_info.local_args, **op_info.local_kwargs)
+    else:
+        local_results = tp_convolution(
+            op_call, tuple(op_info.local_args), op_info.local_kwargs
+        )
 
     return dtensor.DTensor._op_dispatcher.wrap(
         local_results, output_sharding.output_spec
@@ -275,9 +283,17 @@ def convolution_backward_handler(
     assert output_sharding is not None, "output sharding should not be None"
 
     # local propagation
-    local_results = tp_convolution_backward(
-        op_call, tuple(op_info.local_args), op_info.local_kwargs
+    no_sharded_args = not any(
+        dt_spec.is_sharded()
+        for dt_spec in op_info.schema.args_schema
+        if isinstance(dt_spec, DTensorSpec)
     )
+    if no_sharded_args:
+        local_results = op_call(*op_info.local_args, **op_info.local_kwargs)
+    else:
+        local_results = tp_convolution_backward(
+            op_call, tuple(op_info.local_args), op_info.local_kwargs
+        )
 
     return dtensor.DTensor._op_dispatcher.wrap(
         local_results, output_sharding.output_spec
