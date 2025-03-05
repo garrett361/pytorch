@@ -11,6 +11,50 @@ import torch.distributed.tensor._api as dtensor
 aten = torch.ops.aten
 
 
+"""
+NOTE: TP Convolutions
+
+Assumption: the inputs are sharded into shard_world_size chunks over a single dimension whose
+unsharded size is `L_in`.
+
+Goal: each rank ends up with its shard of the output tensor, per `torch.chunk` semantics.
+
+The logical, unsharded output of the convolution along this dimension is of size:
+
+```
+L_out = 1 + (L_in + 2 * padding - dilation * (kernel_size - 1) - 1) // stride
+```
+
+where `padding`, `dilation`, etc. are the parameters specific to the sharded dimension. The length
+of the output shard per rank will then be `L_out_shard = L_out // shard_world_size` (with the final
+rank possibly receiving an unequal chunk). That is, a given rank logically computes:
+
+```
+outputs_sharded = outputs[..., rank * L_out_shard: (rank + 1) * L_out_shard, ...]
+```
+with the slice along the sharded dim.
+
+where `outputs` is the logical non-TP result.
+
+Pre-convolution, each rank has a chunk of size `L_in_shard = L_in // shard_world_size` along the
+sharded dim:
+
+```
+inputs_sharded = inputs[..., rank * L_in_shard: (rank + 1) * L_in_shard, ...]
+```
+
+This is insufficient information to compute the desired `output_sharded`. A given rank instead
+requires the slice
+
+```
+inputs_sharded_required = inputs[..., rank * L_out_shard: kernel_size - 1 * (rank + 1) * L_out_shard, ...]
+```
+
+Non-trivial padding, stride, and dilations change the above to TODO: @goon
+
+"""
+
+
 def _requires_data_exchange(padding):
     # TODO: whether there requires data exchange is currently determined by padding
     return padding[1] != 0
