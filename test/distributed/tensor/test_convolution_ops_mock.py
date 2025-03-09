@@ -2,12 +2,31 @@
 Mock ups of TP convolutions.
 """
 
-from typing import Optional
-import torch
-import torch.nn.functional as F
-import pytest
+from dataclasses import dataclass
+from typing import Any, Optional
 
-CONV_FNS = {1: F.conv1d, 2: F.conv2d, 3: F.conv3d}
+import pytest
+import torch
+
+aten = torch.ops.aten
+
+
+@dataclass
+class PyTestParams:
+    arg_name: str
+    vals: tuple[Any, ...]
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        return [f"({self.arg_name}={v})" for v in self.vals]
+
+
+WORLD_SIZES = PyTestParams("world_size", (2, 3, 4))
+N_CONV_DIMS = PyTestParams("n_conv_dims", (1, 2, 3))
+STRIDES = PyTestParams("stride", (1, 2, 3, 4))
+D_MODELS = PyTestParams("d_model", (63, 64, 65))
+DILATIONS = PyTestParams("dilation", (1, 2, 3, 4))
+PADDINGS = PyTestParams("padding", (0, 1, 2, 3))
 
 
 class TestConv:
@@ -63,65 +82,121 @@ class TestConv:
 
         weight = self.get_weight_tensor(kernel_size, n_conv_dims)
         bias = self.get_bias_tensor()
-        outputs = CONV_FNS[n_conv_dims](
+        outputs = aten.convolution.default(
             inputs,
             weight=weight,
             bias=bias,
             stride=tuple(stride for _ in range(n_conv_dims)),
             padding=tuple(padding for _ in range(n_conv_dims)),
             dilation=tuple(dilation for _ in range(n_conv_dims)),
+            transposed=False,
+            groups=1,
+            output_padding=tuple(0 for _ in range(n_conv_dims)),
         )
 
-        L_out_expected = (
-            1 + (d_model + 2 * padding - dilation * (kernel_size - 1) - 1) // stride
-        )
+        eff_kernel_size = dilation * (kernel_size - 1) + 1
+        L_out_expected = 1 + (d_model + 2 * padding - eff_kernel_size) // stride
         assert L_out_expected == outputs.shape[-1]
 
-        L_in_shard = (inputs.shape[-1] + world_size - 1) // world_size
-        L_out_shard = (L_out_expected + world_size - 1) // world_size
+        # Create slice points for the necessary chunks. Salient facts:
+        # 1) Each rank creates at least L_out_expected // world_size elements, and any leftover
+        #    are passed out in order. Let L_out_shard[rank] be the number of output elements.
+        # 2) In the absence of padding, a total of n_input_elem[rank] = eff_kernel_size + stride *
+        #    (L_out_shard[rank] - 1) elements from the inputs are required to create the right
+        #    number of outputs. Padding just means we load padding fewer elements for the first
+        #    sharded output computation.
+        # 3) If a shard covers the slice [slice_start[rank]:slice_start[rank]] for a given rank,
+        #    then the kernel covered up to and including the position slice_start[rank] - 1. Rank
+        #    rank +1 will then start at slice_start[rank + 1] = slice_stop[rank] - eff_kernel_size +
+        #    stride and cover n_input_elem[rank] total elements.
+        #
+        # Conclusion: each rank needs the following slice to compute its outputs:
+        #
+        # inputs[..., rank * stride * L_out_shard[rank] - padding: rank * stride * L_out_shard[rank] - padding + n_input_elem]
+        L_out_shard_min, remainder = divmod(L_out_expected, world_size)
+        L_out_shard = [
+            L_out_shard_min + (rank < remainder) for rank in range(world_size)
+        ]
+        n_input_elem = [
+            eff_kernel_size + stride * (L_out_shard[rank] - 1)
+            for rank in range(world_size)
+        ]
+        slice_start = [0]
+        slice_stop = [n_input_elem[0] - padding]
+        for rank in range(1, world_size):
+            slice_start.append(slice_stop[-1] + stride - eff_kernel_size)
+            slice_stop.append(slice_start[-1] + n_input_elem[rank])
 
+        # Padding considerations:
+        # 1) The first shard uses unwanted padding along the sharded dim at its upper range, and
+        #    this is removed by only taking the first L_out_shard elements.
+        # 2) None of the middle shards should use padding along the sharded dim.
+        # 3) The final slice must use both use at least the requested amount of padding at its upper
+        #    end, while also ensuring that the kernel becomes naturally aligned with the start of its
+        #    non-padding data.  Solution: use stride * ceil(padding / stride) and take the output
+        #    slice starting from index ceil(padding / stride) and containing the number of output
+        #    elements expected in the final shard (which may be fewer than L_out_shard!)
+        last_shard_out_idx_start = (padding + stride - 1) // stride
+        last_shard_padding = stride * last_shard_out_idx_start
 
-        # # Create slice points for the necessary chunks. Each chunk needs to produce L_out_shard
-        # # outputs, except maybe the final rank. Only the lead and final ranks will use any padding.
-        # slice_start = [0]
-        # slice_stop = []
-        # # The number of output elements due to padding one one side of the input
-        # n_pad_outputs = padding // stride
-        # effective_kernel_size =  (dilation * (kernel_size - 1) + 1)
-        # # Creating L_out_shard outputs requires this many inputs:
-        # n_input_elem_per_chunk = stride * (L_out_shard-1) + effective_kernel_size
-        # # Lead rank:
-        # slice_stop.append(n_input_elem_per_chunk)
-        # # Middle ranks:
-        # # for _ in range(world_size-2):
-        # #     slice_stop.append(slice_stop[-1] + step_size)
-        # # Last rank
-        # slice_stop.append(-1)
-
+        stride_list = [stride for _ in range(n_conv_dims)]
+        dilation_list = [dilation for _ in range(n_conv_dims)]
+        # Ranks differ in their padding along the sharded_dim
+        padding_list_start = [padding for _ in range(n_conv_dims - 1)]
 
         outputs_chunked = []
         for rank in range(world_size):
-            input_chunk = inputs[
-                ...,
-                rank * stride * L_out_shard : (dilation * (kernel_size - 1) + 1)
-                - 1
-                + (rank + 1) * stride * L_out_shard,
-            ]
-            not_first_or_last_rank = rank not in (0, world_size - 1)
-            out_chunk = CONV_FNS[n_conv_dims](
+            is_lead_rank = rank == 0
+            is_last_rank = rank == world_size - 1
+            # Get the right sharded dim padding:
+            if is_lead_rank:
+                padding_list = padding_list_start + [padding]
+            elif is_last_rank:
+                padding_list = padding_list_start + [last_shard_padding]
+            else:
+                padding_list = padding_list_start + [0]
+            # Need a bounds check for `slice_start[rank]` equal to the end of the inputs slice.
+
+            input_chunk = inputs[..., slice_start[rank] : slice_stop[rank]]
+            # If we're not the first or last rank, we shouldn't be using any padding at all
+            # along the sharded dim.
+
+            out_chunk = aten.convolution.default(
                 input_chunk,
                 weight=weight,
                 bias=bias,
-                stride=tuple(stride for _ in range(n_conv_dims)),
-                # If we're not the first or last rank, we shouldn't be using any padding at all.
-                padding=tuple(
-                    0 if not_first_or_last_rank else padding for _ in range(n_conv_dims)
-                ),
-                dilation=tuple(dilation for _ in range(n_conv_dims)),
+                stride=stride_list,
+                padding=padding_list,
+                dilation=dilation_list,
+                transposed=False,
+                groups=1,
+                output_padding=tuple(0 for _ in range(n_conv_dims)),
             )
+            if padding > 0 and is_lead_rank:
+                out_chunk = out_chunk[..., : L_out_shard[0]]
+            if padding > 0 and is_last_rank:
+                out_chunk = out_chunk[
+                    ...,
+                    last_shard_out_idx_start : last_shard_out_idx_start
+                    + L_out_shard[-1],
+                ]
             outputs_chunked.append(out_chunk)
         outputs_chunked_cat = torch.cat(outputs_chunked, dim=-1)
         torch.testing.assert_close(outputs, outputs_chunked_cat)
+
+    # padding=1-d_model=63-dilation=3-stride=4-n_conv_dims=3-world_size=4
+    # [padding=1-d_model=63-dilation=3-stride=4-n_conv_dims=3-world_size=4]
+    # [padding=1-d_model=63-dilation=4-stride=4-n_conv_dims=3-world_size=4]
+    def test(self) -> None:
+        self._test_template_fwd(
+            padding=3,
+            d_model=33,
+            # d_model=64,
+            dilation=1,
+            stride=4,
+            n_conv_dims=3,
+            world_size=4,
+        )
 
     def test_1d_fwd(self) -> None:
         self._test_template_fwd(n_conv_dims=1)
@@ -150,11 +225,28 @@ class TestConv:
     def test_3d_fwd_dilated(self) -> None:
         self._test_template_fwd(n_conv_dims=3, dilation=2)
 
-    @pytest.mark.parametrize("world_size", (2, 3, 4))
-    @pytest.mark.parametrize("n_conv_dims", (1, 2, 3))
-    @pytest.mark.parametrize("stride", (1, 2, 3, 4))
-    @pytest.mark.parametrize("dilation", (1, 2, 3, 4))
-    @pytest.mark.parametrize("d_model", (63, 64, 65))
+    def test_1d_fwd_padded(self) -> None:
+        self._test_template_fwd(n_conv_dims=1, padding=2)
+
+    def test_2d_fwd_padded(self) -> None:
+        self._test_template_fwd(n_conv_dims=2, padding=2)
+
+    def test_3d_fwd_padded(self) -> None:
+        self._test_template_fwd(n_conv_dims=3, padding=2)
+
+    def test_1d_fwd_padded_strided(self) -> None:
+        self._test_template_fwd(n_conv_dims=1, padding=3, stride=2, d_model=63)
+
+    @pytest.mark.parametrize(
+        WORLD_SIZES.arg_name, WORLD_SIZES.vals, ids=WORLD_SIZES.ids
+    )
+    @pytest.mark.parametrize(
+        N_CONV_DIMS.arg_name, N_CONV_DIMS.vals, ids=N_CONV_DIMS.ids
+    )
+    @pytest.mark.parametrize(STRIDES.arg_name, STRIDES.vals, ids=STRIDES.ids)
+    @pytest.mark.parametrize(DILATIONS.arg_name, DILATIONS.vals, ids=DILATIONS.ids)
+    @pytest.mark.parametrize(D_MODELS.arg_name, D_MODELS.vals, ids=D_MODELS.ids)
+    @pytest.mark.parametrize(PADDINGS.arg_name, PADDINGS.vals, ids=PADDINGS.ids)
     def test_fwd_multi(
         self,
         world_size: int,
@@ -162,6 +254,7 @@ class TestConv:
         stride: int,
         dilation: int,
         d_model: int,
+        padding: int,
     ) -> None:
         self._test_template_fwd(
             world_size=world_size,
@@ -169,4 +262,5 @@ class TestConv:
             stride=stride,
             dilation=dilation,
             d_model=d_model,
+            padding=padding,
         )
